@@ -1,6 +1,3 @@
-
-import os
-import pandas as pd
 import bcrypt
 import streamlit as st
 
@@ -106,38 +103,3 @@ def logout(log):
     st.session_state.perfil = None
 
     st.rerun()
-
-
-# =====================================
-# LEITURA DOS LOGS LOCAIS
-# =====================================
-
-def ler_logs_local(nome_arquivo):
-
-    dados = []
-
-    if not os.path.exists(nome_arquivo):
-        return pd.DataFrame(
-            columns=["data", "nivel", "mensagem"]
-        )
-
-    with open(
-        nome_arquivo,
-        "r",
-        encoding="utf-8",
-        errors="replace"
-    ) as arquivo:
-
-        for linha in arquivo:
-
-            partes = linha.strip().split(" - ", 2)
-
-            if len(partes) == 3:
-
-                dados.append({
-                    "data": partes[0],
-                    "nivel": partes[1],
-                    "mensagem": partes[2]
-                })
-
-    return pd.DataFrame(dados)

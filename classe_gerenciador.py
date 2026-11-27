@@ -1,5 +1,4 @@
 import json
-import logging
 import socket
 import time
 from datetime import datetime
@@ -11,25 +10,16 @@ from conexao_banco import conectar_banco
 
 
 class GerenciadorLog:
-    """Registra eventos no arquivo local, MySQL e AWS CloudWatch."""
+    """Envia logs da aplicação ao CloudWatch e grava eventos operacionais no MySQL."""
 
-    def __init__(self, arquivo):
-        self.arquivo = arquivo
-
-        logging.basicConfig(
-            filename=self.arquivo,
-            level=logging.INFO,
-            format="%(asctime)s - %(levelname)s - %(message)s",
-            encoding="utf-8",
-            force=True,
-        )
-
+    def __init__(self):
         self.grupo_cloudwatch = "/projeto-integrador/supervisorio"
         nome_host = socket.gethostname().replace(".local", "").replace(" ", "-")
         self.fluxo_cloudwatch = f"streamlit-{nome_host}"
         self.regiao_cloudwatch = "us-east-1"
         self.cloudwatch = None
         self.cloudwatch_pronto = False
+        self.erro_cloudwatch = None
 
         try:
             self.cloudwatch = boto3.client(
@@ -38,13 +28,10 @@ class GerenciadorLog:
             )
             self.cloudwatch_pronto = self._preparar_cloudwatch()
         except Exception as erro:
-            logging.warning(
-                "CloudWatch não inicializado. Os registros locais e MySQL continuarão ativos: %s",
-                erro,
-            )
+            self.erro_cloudwatch = str(erro)
 
     def _preparar_cloudwatch(self):
-        """Garante a existência do grupo e do fluxo de logs."""
+        """Garante a existência do grupo e do fluxo de logs no CloudWatch."""
         if self.cloudwatch is None:
             return False
 
@@ -87,24 +74,12 @@ class GerenciadorLog:
                 except self.cloudwatch.exceptions.ResourceAlreadyExistsException:
                     pass
 
+            self.erro_cloudwatch = None
             return True
 
         except Exception as erro:
-            logging.warning(
-                "Não foi possível preparar o CloudWatch; arquivo local e MySQL permanecem ativos: %s",
-                erro,
-            )
+            self.erro_cloudwatch = str(erro)
             return False
-
-    @staticmethod
-    def _nivel_logging(nivel):
-        niveis = {
-            "INFO": logging.INFO,
-            "WARNING": logging.WARNING,
-            "ERROR": logging.ERROR,
-            "CRITICAL": logging.CRITICAL,
-        }
-        return niveis.get(str(nivel).upper(), logging.INFO)
 
     @staticmethod
     def _identificar_usuario(mensagem):
@@ -113,10 +88,14 @@ class GerenciadorLog:
         except Exception:
             usuario = None
 
-        if not usuario and "usuário: " in mensagem:
-            usuario = mensagem.rsplit("usuário: ", 1)[-1].strip()
+        if not usuario:
+            for marcador in ("usuário: ", "usuario: "):
+                if marcador in mensagem.casefold():
+                    posicao = mensagem.casefold().rfind(marcador)
+                    usuario = mensagem[posicao + len(marcador):].strip()
+                    break
 
-        return usuario
+        return usuario or "Não identificado"
 
     @staticmethod
     def _identificar_equipamento(mensagem):
@@ -128,51 +107,15 @@ class GerenciadorLog:
             return "Motor 01"
         return "Sistema"
 
-    def _registrar_mysql(self, equipamento, mensagem, usuario, nivel):
-        conexao = None
-        cursor = None
-
-        try:
-            conexao = conectar_banco()
-            cursor = conexao.cursor()
-
-            sql = """
-                INSERT INTO eventos (
-                    equipamento,
-                    evento,
-                    usuario,
-                    nivel
-                )
-                VALUES (%s, %s, %s, %s)
-            """
-
-            cursor.execute(
-                sql,
-                (equipamento, mensagem, usuario, nivel),
-            )
-            conexao.commit()
-
-        except Exception as erro:
-            logging.error(
-                "Falha ao registrar evento no MySQL: %s",
-                erro,
-            )
-
-        finally:
-            if cursor is not None:
-                cursor.close()
-            if conexao is not None:
-                conexao.close()
-
     def _registrar_cloudwatch(self, equipamento, mensagem, usuario, nivel):
         if self.cloudwatch is None:
-            return
+            return False
 
         if not self.cloudwatch_pronto:
             self.cloudwatch_pronto = self._preparar_cloudwatch()
 
         if not self.cloudwatch_pronto:
-            return
+            return False
 
         evento = {
             "timestamp_local": datetime.now().astimezone().isoformat(),
@@ -189,48 +132,84 @@ class GerenciadorLog:
                 logEvents=[
                     {
                         "timestamp": int(time.time() * 1000),
-                        "message": json.dumps(
-                            evento,
-                            ensure_ascii=False,
-                        ),
+                        "message": json.dumps(evento, ensure_ascii=False),
                     }
                 ],
             )
+            self.erro_cloudwatch = None
+            return True
 
         except Exception as erro:
-            # Não interrompe o supervisório se a sessão temporária da AWS expirar.
-            logging.warning(
-                "Falha ao enviar evento ao CloudWatch: %s",
-                erro,
-            )
+            # Sem fallback local: falhas de envio permanecem visíveis no retorno.
             self.cloudwatch_pronto = False
+            self.erro_cloudwatch = str(erro)
+            return False
 
     def registrar(self, nivel, mensagem):
+        """Registra eventos de acesso, segurança e aplicação somente no CloudWatch."""
         nivel = str(nivel).upper()
         mensagem = str(mensagem)
-
-        # 1. ARQUIVO LOCAL
-        logging.log(
-            self._nivel_logging(nivel),
-            mensagem,
-        )
-
-        # 2. IDENTIFICAÇÃO DO USUÁRIO E EQUIPAMENTO
         usuario = self._identificar_usuario(mensagem)
         equipamento = self._identificar_equipamento(mensagem)
 
-        # 3. BANCO DE DADOS MYSQL
-        self._registrar_mysql(
+        return self._registrar_cloudwatch(
             equipamento,
             mensagem,
             usuario,
             nivel,
         )
 
-        # 4. AWS CLOUDWATCH
-        self._registrar_cloudwatch(
-            equipamento,
-            mensagem,
-            usuario,
-            nivel,
-        )
+    def registrar_evento_processo(
+        self,
+        equipamento,
+        evento,
+        usuario=None,
+        nivel="INFO",
+    ):
+        """Grava exclusivamente eventos reais do processo na tabela eventos do MySQL."""
+        equipamento = str(equipamento).strip()
+        evento = str(evento).strip()
+        nivel = str(nivel).upper()
+
+        if not equipamento or not evento:
+            return False
+
+        if usuario is None:
+            try:
+                usuario = st.session_state.get("usuario")
+            except Exception:
+                usuario = None
+
+        conexao = None
+        cursor = None
+
+        try:
+            conexao = conectar_banco()
+            cursor = conexao.cursor()
+            cursor.execute(
+                """
+                INSERT INTO eventos (
+                    equipamento,
+                    evento,
+                    usuario,
+                    nivel
+                )
+                VALUES (%s, %s, %s, %s)
+                """,
+                (equipamento, evento, usuario, nivel),
+            )
+            conexao.commit()
+            return True
+
+        except Exception as erro:
+            self.registrar(
+                "ERROR",
+                f"Falha ao registrar evento operacional no MySQL: {erro}",
+            )
+            return False
+
+        finally:
+            if cursor is not None:
+                cursor.close()
+            if conexao is not None:
+                conexao.close()

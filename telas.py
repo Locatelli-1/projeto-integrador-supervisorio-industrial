@@ -1,5 +1,4 @@
 import json
-import logging
 import os
 from datetime import datetime, timedelta
 
@@ -7,7 +6,7 @@ import pandas as pd
 import streamlit as st
 from sqlalchemy import text
 
-from autenticacao import autenticar, ler_logs_local
+from autenticacao import autenticar
 from conexao_banco import conectar_banco, criar_engine
 from Classe_OPC import Conexao_Opc
 
@@ -401,7 +400,6 @@ def registrar_leitura_sensor(sensor, valor, unidade, equipamento="Esteira 01"):
         return True
 
     except Exception:
-        logging.exception("Falha ao registrar leitura OPC UA no MySQL")
         return False
 
     finally:
@@ -443,25 +441,31 @@ def monitorar_processo_opc(log):
         if leitura_anterior is not None:
             if leitura_atual["motor"] != leitura_anterior["motor"]:
                 estado = "LIGADA" if leitura_atual["motor"] else "DESLIGADA"
-                log.registrar("INFO", f"Esteira 01 alterou o estado para {estado}.")
+                log.registrar_evento_processo(
+                    "Esteira 01",
+                    f"Estado da esteira alterado para {estado}",
+                )
 
             if leitura_atual["sensor"] != leitura_anterior["sensor"]:
                 estado_sensor = (
                     "Caixa detectada" if leitura_atual["sensor"] else "Sensor livre"
                 )
-                log.registrar(
-                    "INFO",
-                    f"Sensor de presença da Esteira 01: {estado_sensor}.",
+                log.registrar_evento_processo(
+                    "Esteira 01",
+                    f"Sensor de presença: {estado_sensor}",
                 )
 
             if leitura_atual["start"] != leitura_anterior["start"]:
-                estado_start = "ativado" if leitura_atual["start"] else "desativado"
-                log.registrar("INFO", f"Esteira 01 - Comando de partida {estado_start}.")
+                estado_start = "iniciado" if leitura_atual["start"] else "parado"
+                log.registrar_evento_processo(
+                    "Esteira 01",
+                    f"Processo {estado_start} pelo comando de partida",
+                )
 
             if abs(leitura_atual["velocidade"] - leitura_anterior["velocidade"]) >= 0.001:
-                log.registrar(
-                    "INFO",
-                    f"Esteira 01 - Velocidade alterada para {leitura_atual['velocidade']:.2f} m/s.",
+                log.registrar_evento_processo(
+                    "Esteira 01",
+                    f"Velocidade alterada para {leitura_atual['velocidade']:.2f} m/s",
                 )
 
         # Histórico curto para visualização em tempo real.
@@ -532,17 +536,27 @@ def monitorar_processo_opc(log):
 
         for alerta in alertas_atuais:
             if alerta not in alertas_anteriores:
-                log.registrar("WARNING", f"Esteira 01 - ALERTA: {alerta}")
+                log.registrar_evento_processo(
+                    "Esteira 01",
+                    f"ALERTA: {alerta}",
+                    nivel="WARNING",
+                )
 
         for alerta in alertas_anteriores:
             if alerta not in alertas_atuais:
-                log.registrar("INFO", f"Esteira 01 - Alerta normalizado: {alerta}")
+                log.registrar_evento_processo(
+                    "Esteira 01",
+                    f"Alerta normalizado: {alerta}",
+                )
 
         st.session_state.opc_alertas_ativos = alertas_atuais
 
         # Registra a recuperação da comunicação OPC UA.
         if st.session_state.get("opc_ultimo_erro"):
-            log.registrar("INFO", "Comunicação OPC UA restabelecida com o CLP.")
+            log.registrar_evento_processo(
+                "Esteira 01",
+                "Comunicação OPC UA restabelecida com o CLP",
+            )
             st.session_state.opc_ultimo_erro = None
 
         # Guarda a leitura atual depois de comparar e registrar transições.
@@ -647,10 +661,14 @@ def monitorar_processo_opc(log):
         mensagem_erro = str(erro)
 
         if st.session_state.get("opc_ultimo_erro") != mensagem_erro:
-            logging.exception("Falha na comunicação OPC UA")
             log.registrar(
                 "ERROR",
                 f"Falha na comunicação OPC UA com o CLP: {mensagem_erro}",
+            )
+            log.registrar_evento_processo(
+                "Esteira 01",
+                f"Falha na comunicação OPC UA com o CLP: {mensagem_erro}",
+                nivel="ERROR",
             )
             st.session_state.opc_ultimo_erro = mensagem_erro
 
@@ -712,7 +730,6 @@ def tela_processo(log):
                         st.error("O CLP não confirmou o envio do comando.")
 
                 except Exception as erro:
-                    logging.exception("Erro ao enviar comando de partida")
                     log.registrar(
                         "ERROR",
                         f"Falha ao ligar a Esteira 01 via OPC UA: {erro}",
@@ -739,7 +756,6 @@ def tela_processo(log):
                         st.error("O CLP não confirmou o envio do comando.")
 
                 except Exception as erro:
-                    logging.exception("Erro ao enviar comando de parada")
                     log.registrar(
                         "ERROR",
                         f"Falha ao desligar a Esteira 01 via OPC UA: {erro}",
@@ -792,7 +808,6 @@ def tela_processo(log):
                     st.error("Não foi possível enviar o ajuste ao CLP.")
 
             except Exception as erro:
-                logging.exception("Erro ao ajustar velocidade da esteira")
                 log.registrar(
                     "ERROR",
                     f"Falha ao ajustar velocidade da Esteira 01 via OPC UA: {erro}",
@@ -822,6 +837,11 @@ def tela_banco_dados():
         "BANCO DE DADOS",
     )
 
+    st.caption(
+        "Esta consulta exibe somente eventos operacionais associados aos equipamentos. "
+        "Eventos de login, segurança e atividades administrativas ficam no AWS CloudWatch."
+    )
+
     engine = None
 
     try:
@@ -833,6 +853,8 @@ def tela_banco_dados():
                     """
                     SELECT MIN(data_hora), MAX(data_hora)
                     FROM eventos
+                    WHERE equipamento IS NOT NULL
+                      AND equipamento <> 'Sistema'
                     """
                 )
             ).one()
@@ -849,6 +871,7 @@ def tela_banco_dados():
                     SELECT DISTINCT equipamento
                     FROM eventos
                     WHERE equipamento IS NOT NULL
+                      AND equipamento <> 'Sistema'
                     ORDER BY equipamento
                     """
                 ),
@@ -861,6 +884,8 @@ def tela_banco_dados():
                     SELECT DISTINCT usuario
                     FROM eventos
                     WHERE usuario IS NOT NULL
+                      AND equipamento IS NOT NULL
+                      AND equipamento <> 'Sistema'
                     ORDER BY usuario
                     """
                 ),
@@ -914,7 +939,9 @@ def tela_banco_dados():
                     usuario AS 'Usuário',
                     nivel AS 'Nível'
                 FROM eventos
-                WHERE data_hora >= :inicio
+                WHERE equipamento IS NOT NULL
+                  AND equipamento <> 'Sistema'
+                  AND data_hora >= :inicio
                   AND data_hora < :fim
             """
 
@@ -971,7 +998,6 @@ def tela_banco_dados():
                 )
 
     except Exception:
-        logging.exception("Erro ao consultar registros no banco de dados")
         st.error(
             "Não foi possível consultar os registros do MySQL. "
             "Verifique a conexão e a estrutura da tabela eventos."
@@ -1150,7 +1176,9 @@ def tela_graficos():
                     f"""
                     SELECT data_hora, equipamento, evento, usuario, nivel
                     FROM eventos
-                    {filtro_sql}
+                    WHERE equipamento IS NOT NULL
+                      AND equipamento <> 'Sistema'
+                      {f"AND data_hora >= :inicio" if inicio is not None else ""}
                     ORDER BY data_hora ASC
                     """
                 ),
@@ -1302,6 +1330,7 @@ def tela_graficos():
             st.metric("Acionamentos", total_acionamentos)
 
         st.caption(
+            "Os registros operacionais são consultados separadamente dos logs de autenticação e segurança, que permanecem no AWS CloudWatch. "
             "Os indicadores acima utilizam somente os registros identificados "
             "como Estado do motor, Sensor de presença e Velocidade da esteira. "
             "Os registros antigos de temperatura e RPM não entram nesses indicadores."
@@ -1458,7 +1487,7 @@ def tela_graficos():
 
         # EVENTOS POR DIA
         st.divider()
-        st.subheader("Quantidade de eventos por dia")
+        st.subheader("Eventos operacionais por dia")
 
         eventos_validos = eventos.dropna(subset=["data_hora"]).copy()
 
@@ -1531,7 +1560,7 @@ def tela_graficos():
 
         if not eventos.empty:
             mascara_processo = eventos["evento_normalizado"].str.contains(
-                "esteira 01|sensor de presença|sensor de presenca|opc ua|caixa detectada",
+                "esteira|motor|sensor de presença|sensor de presenca|opc ua|caixa detectada|velocidade|alerta|comando de partida|processo",
                 regex=True,
                 na=False,
             )
@@ -1580,7 +1609,6 @@ def tela_graficos():
         )
 
     except Exception:
-        logging.exception("Erro ao carregar gráficos do banco de dados")
 
         st.error(
             "Não foi possível carregar os gráficos. "
@@ -1700,47 +1728,8 @@ def ler_logs_cloudwatch(log, minutos=60, limite_paginas=10):
     )
 
 
-def normalizar_logs_locais(logs):
-    """Padroniza os logs locais para a mesma estrutura do CloudWatch."""
-    colunas = [
-        "data",
-        "nivel",
-        "usuario",
-        "equipamento",
-        "mensagem",
-        "origem",
-    ]
-
-    if logs is None or logs.empty:
-        return pd.DataFrame(columns=colunas)
-
-    dados = logs.copy()
-
-    for coluna in ("data", "nivel", "mensagem"):
-        if coluna not in dados.columns:
-            dados[coluna] = None
-
-    if "usuario" not in dados.columns:
-        dados["usuario"] = "Não identificado"
-
-    if "equipamento" not in dados.columns:
-        dados["equipamento"] = "Sistema"
-
-    dados["data"] = pd.to_datetime(dados["data"], errors="coerce")
-    dados["nivel"] = dados["nivel"].fillna("INFO").astype(str).str.upper()
-    dados["mensagem"] = dados["mensagem"].fillna("").astype(str)
-    dados["usuario"] = dados["usuario"].fillna("Não identificado")
-    dados["equipamento"] = dados["equipamento"].fillna("Sistema")
-    dados["origem"] = "Arquivo local"
-
-    return dados[colunas].dropna(subset=["data"]).sort_values(
-        "data",
-        ascending=False,
-    )
-
-
 @st.fragment(run_every=10)
-def tela_monitoramento(log, arquivo):
+def tela_monitoramento(log):
     aplicar_estilo()
 
     if st.session_state.perfil not in ("admin", "engenheiro"):
@@ -1762,13 +1751,7 @@ def tela_monitoramento(log, arquivo):
     )
 
     st.html('<div class="section-label">FONTE DOS REGISTROS</div>')
-
-    fonte = st.radio(
-        "Selecione a origem dos logs",
-        ["AWS CloudWatch", "Arquivo local"],
-        horizontal=True,
-        key="fonte_logs_seguranca",
-    )
+    st.info("Os registros de acesso e segurança são consultados diretamente no AWS CloudWatch.")
 
     minutos = st.selectbox(
         "Período de consulta",
@@ -1795,45 +1778,23 @@ def tela_monitoramento(log, arquivo):
 
     st.caption("Monitoramento atualizado automaticamente a cada 10 segundos.")
 
-    if fonte == "AWS CloudWatch":
-        try:
-            with st.spinner("Consultando eventos no AWS CloudWatch..."):
-                logs = ler_logs_cloudwatch(log, janela_minutos)
+    try:
+        with st.spinner("Consultando eventos no AWS CloudWatch..."):
+            logs = ler_logs_cloudwatch(log, janela_minutos)
 
-            st.success(
-                f"Consulta realizada no grupo {log.grupo_cloudwatch} — "
-                f"região {log.regiao_cloudwatch}."
-            )
+        st.success(
+            f"Consulta realizada no grupo {log.grupo_cloudwatch} — "
+            f"região {log.regiao_cloudwatch}."
+        )
 
-        except Exception as erro:
-            st.error(
-                "Não foi possível consultar o AWS CloudWatch. "
-                "Verifique se a sessão do AWS Academy/VocLabs está ativa "
-                "e se as permissões de leitura de logs estão disponíveis."
-            )
-
-            st.caption(f"Detalhe técnico: {erro}")
-
-            st.info(
-                "Os registros locais continuam disponíveis. Selecione "
-                "'Arquivo local' para consultar o histórico salvo no computador."
-            )
-            return
-
-    else:
-        try:
-            logs = normalizar_logs_locais(ler_logs_local(arquivo))
-
-            limite_data = (
-                pd.Timestamp.now() - pd.Timedelta(minutes=janela_minutos)
-            )
-
-            logs = logs[logs["data"] >= limite_data]
-
-        except Exception as erro:
-            logging.exception("Erro ao ler logs locais")
-            st.error(f"Não foi possível ler o arquivo de logs locais: {erro}")
-            return
+    except Exception as erro:
+        st.error(
+            "Não foi possível consultar o AWS CloudWatch. "
+            "Verifique se a sessão do AWS Academy/VocLabs está ativa "
+            "e se as permissões de leitura de logs estão disponíveis."
+        )
+        st.caption(f"Detalhe técnico: {erro}")
+        return
 
     if logs.empty:
         st.info("Nenhum evento encontrado na fonte e no período selecionados.")
@@ -2005,7 +1966,6 @@ def tela_cadastro_usuarios(log):
         )
 
     except Exception:
-        logging.exception("Erro ao consultar usuários")
         st.error("Não foi possível consultar os usuários no MySQL.")
         return
 
@@ -2101,7 +2061,6 @@ def tela_cadastro_usuarios(log):
                     st.rerun()
 
                 except Exception:
-                    logging.exception("Erro ao cadastrar usuário")
 
                     st.error(
                         "Não foi possível cadastrar. Verifique se o nome "
@@ -2254,7 +2213,6 @@ def tela_cadastro_usuarios(log):
                         st.rerun()
 
                 except Exception:
-                    logging.exception("Erro ao editar usuário")
 
                     st.error(
                         "Não foi possível atualizar. Verifique se o nome "
@@ -2323,7 +2281,6 @@ def tela_cadastro_usuarios(log):
                         st.rerun()
 
                 except Exception:
-                    logging.exception("Erro ao desativar usuário")
                     st.error("Não foi possível desativar o usuário.")
 
                 finally:
@@ -2364,7 +2321,6 @@ def tela_cadastro_usuarios(log):
                 st.rerun()
 
             except Exception:
-                logging.exception("Erro ao ativar usuário")
                 st.error("Não foi possível ativar o usuário.")
 
             finally:

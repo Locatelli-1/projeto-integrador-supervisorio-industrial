@@ -1,4 +1,3 @@
-
 import streamlit as st
 
 from classe_gerenciador import GerenciadorLog
@@ -14,17 +13,10 @@ from telas import (
 
 
 # =====================================
-# CONFIGURAÇÕES
+# OBJETO DE LOG (AWS CLOUDWATCH)
 # =====================================
 
-ARQUIVO_LOG = "sistema.log"
-
-
-# =====================================
-# OBJETO DE LOG
-# =====================================
-
-log = GerenciadorLog(ARQUIVO_LOG)
+log = GerenciadorLog()
 
 
 # =====================================
@@ -138,10 +130,7 @@ else:
 
     elif tela == "Monitoramento":
 
-        tela_monitoramento(
-            log,
-            ARQUIVO_LOG
-        )
+        tela_monitoramento(log)
 
     elif tela == "Cadastro de Usuários":
 
